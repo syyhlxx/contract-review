@@ -1,0 +1,82 @@
+{
+    
+  "lease_terms": [
+    {
+      "category": "rent",
+      "summary": "Rent is $1,250 per month.",
+
+      "details": {
+        "amount": 1250.00, 
+        "currency": "USD", 
+        "frequency": "monthly"},
+
+      "source": {
+        "section": "2.1", 
+        "page": 2,
+        "quote": "Tenant shall pay..."}
+    },
+
+
+    {
+      "category": "renewal",
+      "summary": "The lease renews automatically for one year.",
+
+      "details": {
+        "term_length": "1 year",
+        "automatic": true
+      },
+
+      "source": {
+        "section": "3.2",
+        "page": 8,
+        "quote": "This release shall automatically renew for a term of one year unless.."
+    }
+
+    },
+
+    {
+      "category": "termination",
+      "summary": "Either party may terminate the lease with 30 days' notice.",
+
+        "details": {
+        "notice_days": 30},
+
+      "source": {
+            "section": "3.2",
+            "page": 8,
+            "quote": "Termination of the lease shall be effective upon delivery of notice..."
+      }
+    },
+
+     {
+      "category": "deposit",
+      "summary": "A security deposit of $1,000 is required.",
+
+      "details": {
+        "amount": 1000.00, 
+        "currency": "USD", 
+        "frequency": "one time"},
+
+      "source": {
+        "section": "3.1", 
+        "page": 2,
+        "quote": "Tenant shall provide..."}
+    },
+
+     {
+      "category": "pets",
+      "summary": "Pets are generally not allowed.",
+
+      "details": {
+        "exemptions": "Service animals only", 
+        "number_of_animals": "Up to three service animals..."},
+        
+      "source": {
+        "section": "6.1",
+        "page": 5,
+        "quote": "Tenant shall only keep..."}
+    }
+  ]
+}
+
+
