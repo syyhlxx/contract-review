@@ -4,6 +4,7 @@
    - Quote the exact clause text for each field.
    - If a term isn't in the lease, return `null` and don't guess.
    - Don't give legal advice.
+   - Always return one entry for every category in the example (rent, term, renewal, termination, deposit, pets). If the lease doesn't address one, set its summary, details and source to null.
 4. **Output format:** the JSON shape you want back. 
 
 {
@@ -82,6 +83,6 @@
     },
   
   ]
-s}
+}
 
 

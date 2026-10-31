@@ -8,7 +8,9 @@
       "details": {
         "amount": 1250.00, 
         "currency": "USD", 
-        "frequency": "monthly"},
+        "frequency": "monthly",
+        "due_date": "1st of the month"  
+      },
 
       "source": {
         "section": "2.1", 
@@ -16,10 +18,24 @@
         "quote": "Tenant shall pay..."}
     },
 
+    {
+      "category": "term",
+      "summary": "The lease runs from Jan 1 to Dec 31, 2026.",
+
+      "details": { "start_date": "2026-01-01",
+      "end_date": "2026-12-31"
+     },
+
+      "source": { "section": "2.1", 
+      "page": 2, "quote": "The term of this lease..."
+     }
+
+    },
 
     {
       "category": "renewal",
       "summary": "The lease renews automatically for one year.",
+
 
       "details": {
         "term_length": "1 year",
@@ -29,7 +45,7 @@
       "source": {
         "section": "3.2",
         "page": 8,
-        "quote": "This release shall automatically renew for a term of one year unless.."
+        "quote": "This lease shall automatically renew for a term of one year unless.."
     }
 
     },
