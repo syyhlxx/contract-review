@@ -28,12 +28,26 @@ return Response.json(JSON.parse(response.text ?? "{}"));
 
  
 export async function POST(request: Request) {
-  const { prompt, model } = await request.json();
+  
+try {
+//Read the lease instead of a raw prompt: 
+const { leaseText } = await request.json();
 
-  const response = await ai.models.generateContent({
-    model: model || "gemini-3.8-flash",
-    contents: prompt,
-  });
-
-  return Response.json({ reply: response.text });
+if (!leaseText) {
+  return Response.json({ error: "leaseText is required" }, { status: 400 });
 }
+
+const instructions = await readFile(path.join(process.cwd(), "prompts", "extract-terms.md"), "utf-8");
+const example = await readFile(path.join(process.cwd(), "prompts", "example_output.json"), "utf-8");
+const prompt = `${instructions}\n\nExample output:\n${example}\n\nLease:\n${leaseText}`;
+
+const response = await ai.models.generateContent({
+  model: "gemini-3.8-flash",
+  contents: prompt,
+  config: { responseMimeType: "application/json" },
+});
+return Response.json(JSON.parse(response.text ?? "{}"));
+} catch (err) {
+  return Response.json({ error: String(err) }, { status: 500 });
+}
+} 
