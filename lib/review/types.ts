@@ -20,6 +20,11 @@ export type ParsedContract = {
   fileName: string;
   pageCount: number | null;
   clauses: Clause[];
+  /**
+   * Full text pulled out of the file. Present after a real upload.
+   * The sample lease omits it. The extract route sends this string to the model.
+   */
+  text?: string;
 };
 
 export type ClauseNote = {

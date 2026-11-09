@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
+import { LeaseTermsPanel } from "@/components/LeaseTermsPanel";
+import { MAX_UPLOAD_BYTES } from "@/lib/review/limits";
 import { SAMPLE_LEASE, SAMPLE_LEASE_NAME } from "@/lib/review/sampleLease";
 import { splitClauses } from "@/lib/review/splitClauses";
 import type { Clause, ClauseNote, ParsedContract, ReviewStatus } from "@/lib/review/types";
@@ -23,17 +25,34 @@ function noteKey(fileName: string, clauseId: string) {
   return `${fileName}::${clauseId}`;
 }
 
+type ExtractPayload = {
+  error?: string;
+  fileName?: string;
+  pageCount?: number | null;
+  clauses?: Clause[];
+  leaseTerms?: unknown;
+};
+
+const FILE_ACCEPT =
+  ".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain";
+
 export function ReviewWorkspace() {
+  // These are remembered values. Changing one redraws the page.
+  // pendingFile is the lease the user picked. Nothing is sent until they click.
+  // leaseTerms is the model's JSON after a successful extraction.
+  // busy is true while the server is working, which is how the loading state is shown.
   const [contract, setContract] = useState<ParsedContract | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [notes, setNotes] = useState<Record<string, Record<string, ClauseNote>>>({});
+  // Notes live in this browser. The initializer reads them once. On the server
+  // there is no localStorage, so the first render stays on the empty screen.
+  const [notes, setNotes] = useState<Record<string, Record<string, ClauseNote>>>(loadNotes);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "flagged">("all");
-
-  useEffect(() => {
-    setNotes(loadNotes());
-  }, []);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [leaseTerms, setLeaseTerms] = useState<unknown>(null);
+  const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => {
     window.localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
@@ -53,36 +72,102 @@ export function ReviewWorkspace() {
   function applyContract(next: ParsedContract) {
     setContract(next);
     setSelectedId(next.clauses[0]?.id ?? null);
+  }
+
+  function stageFile(file: File | undefined) {
+    if (!file || busy) return;
+    setPendingFile(file);
     setError(null);
   }
 
-  async function onFile(file: File | undefined) {
-    if (!file) return;
+  // Click handler for "Extract lease terms".
+  // The server reads the file, then runs the same Gemini extraction as /api/test.
+  async function extractPending() {
+    const file = pendingFile;
+    if (!file || busy) return;
+
+    if (file.size === 0) {
+      setError(`${file.name}: That file is empty. Choose a lease that contains text.`);
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError(`${file.name}: File is larger than 10 MB.`);
+      return;
+    }
+
     setBusy(true);
     setError(null);
+    setStatus(`Reading ${file.name} and extracting lease terms…`);
+
     try {
+      // FormData is the browser's package for sending a file.
+      // The field name "file" has to match what the route handler reads.
       const body = new FormData();
       body.set("file", file);
-      const response = await fetch("/api/parse", { method: "POST", body });
-      const payload = (await response.json()) as ParsedContract & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || "Could not parse that file.");
+
+      // await pauses this function until the server answers, without freezing the page.
+      const response = await fetch("/api/extract", { method: "POST", body });
+      const payload = await readExtractPayload(response);
+      const parsed = hasContract(payload);
+
+      if (parsed) {
+        applyContract({
+          fileName: payload.fileName as string,
+          pageCount: payload.pageCount ?? null,
+          clauses: payload.clauses as Clause[],
+        });
       }
-      applyContract(payload);
+
+      if (!response.ok) {
+        if (parsed) setLeaseTerms(null);
+        throw new Error(payload.error || "Could not extract lease terms.");
+      }
+
+      if (payload.leaseTerms == null) {
+        setLeaseTerms(null);
+        throw new Error("The model did not return lease terms.");
+      }
+
+      setLeaseTerms(payload.leaseTerms);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Upload failed.");
+      const message =
+        err instanceof TypeError
+          ? "Could not reach the server. Check your connection and try again."
+          : err instanceof Error
+            ? err.message
+            : "Upload failed.";
+      setError(`${file.name}: ${message}`);
     } finally {
       setBusy(false);
+      setStatus(null);
     }
   }
 
   function loadSample() {
+    setError(null);
+    setLeaseTerms(null);
     applyContract({
       fileName: SAMPLE_LEASE_NAME,
       pageCount: null,
       clauses: splitClauses(SAMPLE_LEASE),
     });
   }
+
+  const dropProps = {
+    onDragOver: (event: DragEvent) => {
+      event.preventDefault();
+      if (!busy) setDragActive(true);
+    },
+    onDragLeave: (event: DragEvent) => {
+      if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+      setDragActive(false);
+    },
+    onDrop: (event: DragEvent) => {
+      event.preventDefault();
+      setDragActive(false);
+      stageFile(event.dataTransfer.files[0]);
+    },
+  };
 
   function updateNote(clause: Clause, patch: Partial<ClauseNote>) {
     if (!contract) return;
@@ -105,8 +190,12 @@ export function ReviewWorkspace() {
       : EMPTY_NOTE;
 
   return (
-    <div className="min-h-full bg-[#f4efe6] text-stone-900">
-      <header className="border-b border-stone-300/80 bg-[#fbf8f2]">
+    <div className="min-h-full bg-[#f4efe6] text-stone-900" {...dropProps}>
+      <header
+        className={`border-b border-stone-300/80 bg-[#fbf8f2] ${
+          dragActive ? "ring-2 ring-emerald-800 ring-inset" : ""
+        }`}
+      >
         <div className="mx-auto flex max-w-6xl flex-col gap-4 px-6 py-6 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-xs font-medium tracking-[0.18em] text-emerald-900 uppercase">
@@ -114,29 +203,50 @@ export function ReviewWorkspace() {
             </p>
             <h1 className="mt-1 font-serif text-3xl tracking-tight">Contract Review</h1>
             <p className="mt-2 max-w-xl text-sm text-stone-600">
-              Upload a lease or other agreement. Clauses are split for reading, common
-              risk phrases are flagged, and your notes stay in this browser. This is a
-              review aid, not legal advice.
+              Choose a lease, then extract the key terms. Each value is shown next to
+              the quote it came from. You can still read the clauses and leave notes in
+              this browser. This is a review aid, not legal advice.
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <label className="inline-flex cursor-pointer items-center rounded-md bg-emerald-900 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800">
-              {busy ? "Reading…" : "Upload PDF or DOCX"}
+          <div className="flex flex-wrap items-center gap-2">
+            <label
+              className={`inline-flex cursor-pointer items-center rounded-md border border-stone-400 bg-white px-4 py-2 text-sm hover:bg-stone-50 ${
+                busy ? "pointer-events-none opacity-60" : ""
+              }`}
+            >
+              Choose a file
               <input
                 className="hidden"
                 type="file"
-                accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                accept={FILE_ACCEPT}
                 disabled={busy}
                 onChange={(event) => {
-                  void onFile(event.target.files?.[0]);
+                  stageFile(event.target.files?.[0]);
                   event.target.value = "";
                 }}
               />
             </label>
+            {pendingFile ? (
+              <span
+                className="max-w-48 truncate text-sm text-stone-600"
+                title={pendingFile.name}
+              >
+                {pendingFile.name}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              disabled={!pendingFile || busy}
+              onClick={() => void extractPending()}
+              className="rounded-md bg-emerald-900 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-300 disabled:text-stone-500"
+            >
+              {busy ? "Extracting…" : "Extract lease terms"}
+            </button>
             <button
               type="button"
               className="rounded-md border border-stone-400 bg-white px-4 py-2 text-sm hover:bg-stone-50"
               onClick={loadSample}
+              disabled={busy}
             >
               Try sample lease
             </button>
@@ -144,17 +254,36 @@ export function ReviewWorkspace() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-6">
+      <main className="mx-auto max-w-6xl px-6 py-6" aria-busy={busy}>
         {error ? (
-          <p className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+          <p
+            role="alert"
+            className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+          >
             {error}
+          </p>
+        ) : null}
+        {status ? (
+          <p role="status" className="mb-4 text-sm text-stone-600">
+            {status}
           </p>
         ) : null}
 
         {!contract ? (
-          <EmptyState onSample={loadSample} onFile={onFile} busy={busy} />
+          <EmptyState
+            onSample={loadSample}
+            onFile={stageFile}
+            onExtract={() => void extractPending()}
+            busy={busy}
+            pendingFile={pendingFile}
+            dragActive={dragActive}
+          />
         ) : (
-          <div className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
+          <div className="space-y-6">
+            {leaseTerms != null ? (
+              <LeaseTermsPanel fileName={contract.fileName} result={leaseTerms} />
+            ) : null}
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
             <aside className="rounded-lg border border-stone-300 bg-white">
               <div className="border-b border-stone-200 px-4 py-3">
                 <p className="truncate text-sm font-medium">{contract.fileName}</p>
@@ -277,6 +406,7 @@ export function ReviewWorkspace() {
                 </div>
               </section>
             ) : null}
+            </div>
           </div>
         )}
       </main>
@@ -309,26 +439,61 @@ function FilterChip({
 function EmptyState({
   onSample,
   onFile,
+  onExtract,
   busy,
+  pendingFile,
+  dragActive,
 }: {
   onSample: () => void;
-  onFile: (file: File | undefined) => Promise<void>;
+  onFile: (file: File | undefined) => void;
+  onExtract: () => void;
   busy: boolean;
+  pendingFile: File | null;
+  dragActive: boolean;
 }) {
   return (
     <div
-      className="rounded-lg border border-dashed border-stone-400 bg-white/70 px-6 py-16 text-center"
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => {
-        event.preventDefault();
-        void onFile(event.dataTransfer.files[0]);
-      }}
+      className={`rounded-lg border border-dashed px-6 py-16 text-center ${
+        dragActive ? "border-emerald-800 bg-emerald-50/70" : "border-stone-400 bg-white/70"
+      }`}
     >
       <p className="font-serif text-2xl">Drop a lease here</p>
-      <p className="mt-2 text-sm text-stone-600">PDF, Word (.docx), or .txt, up to 10 MB.</p>
+      <p className="mt-2 text-sm text-stone-600">
+        PDF, Word (.docx), or .txt, up to 10 MB. Choose a file, then click Extract lease terms.
+      </p>
+      {pendingFile ? (
+        <p className="mt-4 text-sm font-medium text-stone-800">{pendingFile.name}</p>
+      ) : null}
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+        <label
+          className={`inline-flex cursor-pointer items-center rounded-md border border-stone-400 bg-white px-4 py-2 text-sm hover:bg-stone-50 ${
+            busy ? "pointer-events-none opacity-60" : ""
+          }`}
+        >
+          Choose a file
+          <input
+            className="hidden"
+            type="file"
+            accept={FILE_ACCEPT}
+            disabled={busy}
+            onChange={(event) => {
+              onFile(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={!pendingFile || busy}
+          onClick={onExtract}
+          className="rounded-md bg-emerald-900 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-300 disabled:text-stone-500"
+        >
+          {busy ? "Extracting…" : "Extract lease terms"}
+        </button>
+      </div>
       <button
         type="button"
-        className="mt-6 text-sm text-emerald-900 underline"
+        className="mt-6 text-sm text-emerald-900 underline disabled:text-stone-400"
         onClick={onSample}
         disabled={busy}
       >
@@ -336,4 +501,22 @@ function EmptyState({
       </button>
     </div>
   );
+}
+
+function hasContract(payload: ExtractPayload): boolean {
+  return typeof payload.fileName === "string" && Array.isArray(payload.clauses);
+}
+
+async function readExtractPayload(response: Response): Promise<ExtractPayload> {
+  const raw = await response.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as ExtractPayload;
+  } catch {
+    throw new Error(
+      response.status === 413
+        ? "File is larger than 10 MB."
+        : "The server returned an unexpected response. Try again.",
+    );
+  }
 }

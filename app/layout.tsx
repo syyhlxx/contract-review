@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Contract Review",
   description:
-    "Upload a lease or other agreement, review clauses, and keep notes.",
+    "Upload a lease, extract the key terms, and review the clauses.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
