@@ -1,53 +1,60 @@
-import { GoogleGenAI } from "@google/genai";
-import { readFile} from "fs/promises";
-import path from "path";
+import {
+  buildDemoPrompt,
+  extractFromPrompt,
+  extractLeaseTerms,
+  LeaseExtractError,
+} from "@/lib/review/extractTerms";
 
+/**
+ * /api/test is the original extraction endpoint.
+ *
+ * POST takes JSON { leaseText } and returns the model's JSON.
+ * GET runs the same extractor on a short hard-coded sentence, using the
+ * original demo prompt wording. The upload box does not call this URL;
+ * it calls /api/extract, which uses the same POST prompt via extractLeaseTerms.
+ */
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const DEMO_LEASE =
+  "Tenant shall pay $1,500 per month, due on the 1st. Security deposit is $1,500. No pets allowed.";
+
+function errorResponse(error: unknown) {
+  const status = error instanceof LeaseExtractError ? error.status : 500;
+  const message = error instanceof Error ? error.message : "Could not extract lease terms.";
+  return Response.json({ error: message }, { status });
+}
 
 export async function GET() {
-  const instructions = await readFile(path.join(process.cwd(), "prompts", "extract-terms.md"), "utf-8");
-  const example = await readFile(path.join(process.cwd(), "prompts", "example_output.json"), "utf-8");
-  const leaseText = "Tenant shall pay $1,500 per month, due on the 1st. Security deposit is $1,500. No pets allowed.";
-
-const prompt = `${instructions}
-
-${example}
-
-Lease text: ${leaseText}
-`;  
-const response = await ai.models.generateContent({
-  model: "gemini-3.8-flash",
-  contents: prompt,
-  config: { responseMimeType: "application/json" },
-});
-return Response.json(JSON.parse(response.text ?? "{}"));
+  try {
+    const prompt = await buildDemoPrompt(DEMO_LEASE);
+    const result = await extractFromPrompt(DEMO_LEASE, prompt);
+    return Response.json(result);
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
-
-
- 
 export async function POST(request: Request) {
-  
-try {
-//Read the lease instead of a raw prompt: 
-const { leaseText } = await request.json();
+  try {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json(
+        { error: 'Send JSON like { "leaseText": "..." }.' },
+        { status: 400 },
+      );
+    }
 
-if (!leaseText) {
-  return Response.json({ error: "leaseText is required" }, { status: 400 });
+    const leaseText =
+      body && typeof body === "object" ? (body as { leaseText?: unknown }).leaseText : undefined;
+
+    if (typeof leaseText !== "string" || leaseText.trim() === "") {
+      return Response.json({ error: "leaseText is required" }, { status: 400 });
+    }
+
+    const result = await extractLeaseTerms(leaseText);
+    return Response.json(result);
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
-
-const instructions = await readFile(path.join(process.cwd(), "prompts", "extract-terms.md"), "utf-8");
-const example = await readFile(path.join(process.cwd(), "prompts", "example_output.json"), "utf-8");
-const prompt = `${instructions}\n\nExample output:\n${example}\n\nLease:\n${leaseText}`;
-
-const response = await ai.models.generateContent({
-  model: "gemini-3.8-flash",
-  contents: prompt,
-  config: { responseMimeType: "application/json" },
-});
-return Response.json(JSON.parse(response.text ?? "{}"));
-} catch (err) {
-  return Response.json({ error: String(err) }, { status: 500 });
-}
-} 

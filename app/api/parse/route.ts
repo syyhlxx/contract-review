@@ -1,16 +1,18 @@
 import { parseDocument } from "@/lib/review/parseDocument";
+import { readUploadedFile } from "@/lib/review/readUpload";
 
+/**
+ * POST /api/parse
+ *
+ * A route handler is a function Next.js runs on the server when a request
+ * arrives at this URL. This one only reads the file. It does not call a model.
+ * The upload box uses /api/extract, which calls this same file reader and
+ * then the lease-term extraction.
+ */
 export async function POST(request: Request) {
-  const form = await request.formData();
-  const file = form.get("file");
-
-  if (!(file instanceof File)) {
-    return Response.json({ error: "Choose a contract file to review." }, { status: 400 });
-  }
-
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const parsed = await parseDocument(file.name, bytes);
+    const { fileName, bytes } = await readUploadedFile(request);
+    const parsed = await parseDocument(fileName, bytes);
     return Response.json(parsed);
   } catch (error) {
     const message =
