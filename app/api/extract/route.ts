@@ -8,6 +8,8 @@ import type { ParsedContract } from "@/lib/review/types";
  *
  * Route handler for the upload box. The browser sends one file. This
  * function reads the text, then calls the same extraction used by /api/test.
+ * Long leases are split into sections inside that call. The response is
+ * still one lease_terms list.
  *
  * File problems (wrong type, empty, unreadable, too big) answer with status
  * 400. Model problems answer with the extraction error's status and, when

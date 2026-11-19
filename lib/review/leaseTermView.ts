@@ -109,7 +109,14 @@ export function detailEntries(details: unknown): { label: string; value: string 
 export function sourceCaption(source: LeaseTermSource | null | undefined): string | null {
   if (!source) return null;
   const bits: string[] = [];
-  if (!isBlank(source.section)) bits.push(`Section ${String(source.section).trim()}`);
+  if (!isBlank(source.section)) {
+    const section = String(source.section).trim();
+    // "ARTICLE 5" and "Section 8" already name themselves. "Art. 5" has a
+    // period, so it does not end on a word boundary. A bare number such as
+    // "12. Assignment" needs the word Section in front.
+    if (/^(?:section|article|clause)\b|^(?:art\.)/i.test(section)) bits.push(section);
+    else bits.push(`Section ${section}`);
+  }
   if (!isBlank(source.page)) bits.push(`page ${String(source.page).trim()}`);
   return bits.length > 0 ? bits.join(", ") : null;
 }

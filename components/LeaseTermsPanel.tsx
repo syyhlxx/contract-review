@@ -130,6 +130,8 @@ function TermRow({ term }: { term: LeaseTerm }) {
             <p className="whitespace-pre-wrap">&ldquo;{quote}&rdquo;</p>
             {caption ? <p className="mt-2 text-xs text-stone-500">{caption}</p> : null}
           </blockquote>
+        ) : caption ? (
+          <p className="mt-1 text-sm text-stone-600">{caption}</p>
         ) : (
           <p className="mt-1 text-sm text-stone-500">No source quote was returned.</p>
         )}
