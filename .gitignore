@@ -43,3 +43,6 @@ next-env.d.ts
 private/
 *.pdf
 *.docx
+
+# extraction progress, written while an upload is running
+/logs/

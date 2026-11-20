@@ -487,7 +487,7 @@ test("no batch is sent after the upload time limit", async () => {
         }),
       (error: unknown) => {
         assert.ok(error instanceof DeadlineExceededError);
-        assert.match(error.message, /npm run dev/);
+        assert.match(error.message, /logs\/extract\.log/);
         return true;
       },
     );

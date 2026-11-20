@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { POST, runExtract } from "../../app/api/extract/route";
+import { runExtract } from "../../app/api/extract/route";
+import { extractPdfInWorker } from "./extractPdf";
 import { DeadlineExceededError, withDeadline } from "./serverLog";
 
 test("withDeadline rejects and aborts a call that does not finish", async () => {
@@ -22,7 +26,7 @@ test("withDeadline rejects and aborts a call that does not finish", async () => 
       assert.ok(error instanceof DeadlineExceededError);
       assert.equal(error.status, 504);
       assert.match(error.message, /reading the file/);
-      assert.match(error.message, /npm run dev/);
+      assert.match(error.message, /logs\/extract\.log/);
       assert.match(
         new DeadlineExceededError(60_000, "reading the file").message,
         /Stopped after 60 seconds while reading the file/,
@@ -33,15 +37,11 @@ test("withDeadline rejects and aborts a call that does not finish", async () => 
   assert.equal(aborted, true);
 });
 
-test("POST /api/extract logs the file read and the one batch before it returns", async () => {
+test("a .txt upload is logged and extracted without the PDF worker", async () => {
   const previousMock = process.env.GEMINI_MOCK;
   process.env.GEMINI_MOCK = "1";
-  const lines: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array, encoding?: BufferEncoding, callback?: (error?: Error | null) => void) => {
-    lines.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-    return original(chunk, encoding, callback);
-  }) as typeof process.stdout.write;
+  const dir = await mkdtemp(path.join(tmpdir(), "extract-log-"));
+  const logFile = path.join(dir, "extract.log");
 
   try {
     const form = new FormData();
@@ -53,31 +53,33 @@ test("POST /api/extract logs the file read and the one batch before it returns",
         { type: "text/plain" },
       ),
     );
-    const response = await POST(
+    const response = await runExtract(
       new Request("http://local/api/extract", { method: "POST", body: form }),
+      { logFile },
     );
     assert.equal(response.status, 200);
     const body = (await response.json()) as { leaseTerms?: { lease_terms?: unknown[] } };
     assert.ok(Array.isArray(body.leaseTerms?.lease_terms));
+    const text = await readFile(logFile, "utf8");
+    assert.match(text, /POST \/api\/extract received/);
+    assert.match(text, /reading upload/);
+    assert.match(text, /upload read: lease\.txt/);
+    assert.match(text, /reading text from lease\.txt/);
+    assert.match(text, /text extracted: .+ characters, unknown pages, 1 clause/);
+    assert.match(text, /split into 1 chunk and 1 batch/);
+    assert.match(text, /batch 1\/1 sent/);
+    assert.match(text, /batch 1\/1 finished/);
+    assert.match(text, /POST \/api\/extract finished/);
+    assert.doesNotMatch(text, /PDF parsing was stopped/);
+    assert.doesNotMatch(text, /reading the file/);
   } finally {
-    process.stdout.write = original;
     if (previousMock === undefined) delete process.env.GEMINI_MOCK;
     else process.env.GEMINI_MOCK = previousMock;
+    await rm(dir, { recursive: true, force: true });
   }
-
-  const text = lines.join("");
-  assert.match(text, /POST \/api\/extract received/);
-  assert.match(text, /reading upload/);
-  assert.match(text, /upload read: lease\.txt/);
-  assert.match(text, /reading text from lease\.txt/);
-  assert.match(text, /text extracted: .+ characters, unknown pages, 1 clause/);
-  assert.match(text, /split into 1 chunk and 1 batch/);
-  assert.match(text, /batch 1\/1 sent/);
-  assert.match(text, /batch 1\/1 finished/);
-  assert.match(text, /POST \/api\/extract finished/);
 });
 
-test("a hung upload is answered instead of waiting forever", async () => {
+test("a hung upload reports the last step instead of waiting forever", async () => {
   const body = new ReadableStream({
     start() {
       // Never enqueue or close. formData() waits on this body.
@@ -88,26 +90,37 @@ test("a hung upload is answered instead of waiting forever", async () => {
     body,
     duplex: "half",
   } as RequestInit);
-
-  const lines: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array, encoding?: BufferEncoding, callback?: (error?: Error | null) => void) => {
-    lines.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
-    return original(chunk, encoding, callback);
-  }) as typeof process.stdout.write;
+  const dir = await mkdtemp(path.join(tmpdir(), "extract-log-"));
+  const logFile = path.join(dir, "extract.log");
 
   try {
-    const response = await runExtract(request, { fileReadDeadlineMs: 40, deadlineMs: 500 });
+    const response = await runExtract(request, {
+      fileReadDeadlineMs: 40,
+      deadlineMs: 500,
+      logFile,
+    });
     assert.equal(response.status, 504);
     const payload = (await response.json()) as { error?: string };
-    assert.match(payload.error ?? "", /reading the upload/);
-    assert.match(payload.error ?? "", /npm run dev/);
+    const error = payload.error ?? "";
+    assert.match(error, /reading the upload/);
+    assert.match(error, /Last logged step: "reading upload"/);
+    assert.match(error, /Step trail:/);
+    assert.match(error, /POST \/api\/extract received/);
+    assert.match(error, new RegExp(logFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    const text = await readFile(logFile, "utf8");
+    assert.match(text, /POST \/api\/extract received/);
+    assert.match(text, /reading upload/);
+    assert.match(text, /POST \/api\/extract failed/);
   } finally {
-    process.stdout.write = original;
+    await rm(dir, { recursive: true, force: true });
   }
+});
 
-  const text = lines.join("");
-  assert.match(text, /POST \/api\/extract received/);
-  assert.match(text, /reading upload/);
-  assert.match(text, /POST \/api\/extract failed/);
+test("a PDF worker stuck in synchronous work is killed", async () => {
+  const started = Date.now();
+  await assert.rejects(
+    () => extractPdfInWorker(new Uint8Array([1, 2, 3]), { timeoutMs: 200, mode: "hang-sync" }),
+    /PDF parsing was stopped/,
+  );
+  assert.ok(Date.now() - started < 5_000, "the worker was not killed");
 });
