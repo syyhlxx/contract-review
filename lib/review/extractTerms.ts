@@ -12,6 +12,7 @@ import {
 import { readLeaseTerms, type LeaseTerm } from "./leaseTermView";
 import { MAX_LEASE_CHARS, MAX_MODEL_BATCH_CHARS, MODEL_BATCH_CONCURRENCY } from "./limits";
 import { mergeLeaseTerms } from "./mergeLeaseTerms";
+import { DeadlineExceededError, serverLog } from "./serverLog";
 
 /**
  * Turns lease text into the JSON object the model returns.
@@ -115,12 +116,24 @@ export type ExtractLeaseTermsOptions = {
   timeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
-  /** Defaults to console.log, which shows up in the `npm run dev` terminal. */
+  /**
+   * Defaults to serverLog, which writes straight to the dev-server terminal.
+   * Tests pass their own function and read the lines back.
+   */
   log?: (line: string) => void;
   /** Lease characters per model call. Defaults to MAX_MODEL_BATCH_CHARS. */
   maxBatchChars?: number;
   /** Model calls in flight at once. Defaults to MODEL_BATCH_CONCURRENCY. */
   concurrency?: number;
+  /**
+   * Absolute time (Date.now() scale) after which no further model call starts.
+   * The upload route sets this to the request's overall deadline.
+   */
+  deadlineAt?: number;
+  /** Stand-in for Date.now(). Tests move the clock without waiting. */
+  now?: () => number;
+  /** Aborted when the upload's overall deadline fires. */
+  requestSignal?: AbortSignal;
 };
 
 type AttemptOptions = {
@@ -130,6 +143,9 @@ type AttemptOptions = {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   log: (line: string) => void;
+  deadlineAt?: number;
+  now: () => number;
+  requestSignal?: AbortSignal;
 };
 
 type BatchFailure = {
@@ -266,9 +282,10 @@ export async function extractLeaseTerms(
   }
 
   const atOnce = Math.min(Math.max(options?.concurrency ?? MODEL_BATCH_CONCURRENCY, 1), batches.length);
+  const chunkWord = chunks.length === 1 ? "chunk" : "chunks";
   const batchWord = batches.length === 1 ? "batch" : "batches";
   attempt.log(
-    `Extracting lease in ${batches.length} ${batchWord} (limit ${maxBatchChars} characters, ${atOnce} at a time).`,
+    `split into ${chunks.length} ${chunkWord} and ${batches.length} ${batchWord} (limit ${maxBatchChars} characters, ${atOnce} at a time)`,
   );
 
   // A failed batch returns a failure object. It does not throw, so the other
@@ -296,7 +313,12 @@ export async function extractLeaseTerms(
     okBatches.push(batches[i]);
   }
 
-  if (okTerms.length === 0) throw failureToError(failures);
+  if (okTerms.length === 0) {
+    if (failures.length > 0 && failures.every((failure) => failure.error instanceof DeadlineExceededError)) {
+      throw failures[0].error;
+    }
+    throw failureToError(failures);
+  }
 
   const merged = mergeLeaseTerms(okTerms, okBatches, chunks);
   if (failures.length === 0) return merged;
@@ -310,8 +332,15 @@ function resolveOptions(options?: ExtractLeaseTermsOptions): AttemptOptions {
     timeoutMs: options?.timeoutMs ?? GEMINI_REQUEST_TIMEOUT_MS,
     sleep: options?.sleep,
     random: options?.random,
-    log: options?.log ?? ((line) => console.log(line)),
+    log: options?.log ?? serverLog,
+    deadlineAt: options?.deadlineAt,
+    now: options?.now ?? Date.now,
+    requestSignal: options?.requestSignal,
   };
+}
+
+function pastDeadline(options: AttemptOptions): boolean {
+  return options.deadlineAt != null && options.now() >= options.deadlineAt;
 }
 
 function requireApiKey(): void {
@@ -338,9 +367,10 @@ async function runExtraction(leaseText: string, options: AttemptOptions): Promis
  * a Retry-After hint is honored. The SDK's retry does not read that hint.
  */
 async function requestModel(prompt: string, options: AttemptOptions): Promise<string> {
-  const call =
+  const call: GeminiTextCall =
     options.call ??
-    ((text, signal) => generateWithGemini(text, signal, options.timeoutMs));
+    ((text, signal) =>
+      generateWithGemini(text, linkSignals(signal, options.requestSignal), options.timeoutMs));
 
   try {
     return await callGeminiWithRetry(prompt, {
@@ -350,9 +380,10 @@ async function requestModel(prompt: string, options: AttemptOptions): Promise<st
       sleep: options.sleep,
       random: options.random,
       log: options.log,
+      stop: () => pastDeadline(options),
     });
   } catch (error) {
-    if (error instanceof LeaseExtractError) throw error;
+    if (error instanceof LeaseExtractError || error instanceof DeadlineExceededError) throw error;
     const message = error instanceof Error ? error.message : "The model request failed.";
     throw new LeaseExtractError(message, 502);
   }
@@ -407,6 +438,11 @@ async function extractBatch(
 ): Promise<BatchRun> {
   const label = batchSectionLabel(batch, chunks, batchCount);
   const name = `batch ${batch.index + 1}/${batchCount}`;
+  if (pastDeadline(options)) {
+    const error = new DeadlineExceededError(0, "extracting lease terms");
+    options.log(`${name} skipped (upload time limit)`);
+    return { terms: null, failure: { label, reason: "the upload time limit ran out", error } };
+  }
   options.log(`${name} sent (${batch.text.length} characters of lease text)`);
 
   try {
@@ -423,7 +459,7 @@ async function extractBatch(
         failure: { label, reason: "the response did not include lease terms", error },
       };
     }
-    options.log(`${name} ok`);
+    options.log(`${name} finished`);
     return { terms, failure: null };
   } catch (error) {
     const reason = describeGeminiFailure(error).reason;
@@ -456,6 +492,24 @@ function batchSectionLabel(
 function formatWarning(failures: BatchFailure[]): string {
   const list = failures.map((failure) => `${failure.label} — ${failure.reason}`).join("; ");
   return `Some sections could not be read after several tries, so their terms may be missing. The terms below are from the sections that succeeded. Failed sections: ${list}.`;
+}
+
+/**
+ * Abort `attempt` when either signal aborts. The per-attempt timer and the
+ * upload's overall deadline are two different signals; the model call should
+ * stop when either one fires.
+ */
+function linkSignals(attempt: AbortSignal, request: AbortSignal | undefined): AbortSignal {
+  if (!request) return attempt;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (attempt.aborted || request.aborted) {
+    controller.abort();
+    return controller.signal;
+  }
+  attempt.addEventListener("abort", abort, { once: true });
+  request.addEventListener("abort", abort, { once: true });
+  return controller.signal;
 }
 
 function failureToError(failures: BatchFailure[]): LeaseExtractError {

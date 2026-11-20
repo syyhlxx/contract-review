@@ -19,6 +19,8 @@
  * here, and every retry is written to the server log.
  */
 
+import { DeadlineExceededError } from "./serverLog";
+
 /** First try plus three retries. Four total. */
 export const GEMINI_MAX_ATTEMPTS = 4;
 
@@ -91,6 +93,11 @@ export type GeminiRetryOptions = {
   /** Stand-in for Math.random(). Must return a number from 0 to 1. */
   random?: () => number;
   log?: (line: string) => void;
+  /**
+   * When this returns true, stop. The upload's overall time limit has run
+   * out, so another retry would only keep the page spinning.
+   */
+  stop?: () => boolean;
 };
 
 /**
@@ -131,16 +138,25 @@ export async function callGeminiWithRetry(
   const timeoutMs = options.timeoutMs ?? GEMINI_REQUEST_TIMEOUT_MS;
   const sleep = options.sleep ?? delay;
   const random = options.random ?? Math.random;
-  const log = options.log ?? ((line) => console.log(line));
+  const log = options.log ?? ((line) => {
+    // The route passes serverLog. This fallback is for a direct call.
+    process.stdout.write(`${line}\n`);
+  });
 
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (options.stop?.()) {
+      throw new DeadlineExceededError(0, "extracting lease terms");
+    }
     try {
       return await runOneAttempt(options.call, prompt, timeoutMs);
     } catch (error) {
       lastError = error;
-      if (isOurExtractError(error)) throw error;
+      if (isOurExtractError(error) || isDeadlineError(error)) throw error;
+      if (options.stop?.()) {
+        throw new DeadlineExceededError(0, "extracting lease terms");
+      }
 
       const failure = describeGeminiFailure(error);
       const retriesLeft = attempt < maxAttempts;
@@ -436,6 +452,10 @@ function codeOf(error: Error): string | null {
 
 function isOurExtractError(error: unknown): boolean {
   return error instanceof Error && error.name === "LeaseExtractError";
+}
+
+function isDeadlineError(error: unknown): boolean {
+  return error instanceof DeadlineExceededError || (error instanceof Error && error.name === "DeadlineExceededError");
 }
 
 function briefError(error: unknown): string {

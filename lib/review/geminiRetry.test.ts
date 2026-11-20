@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { batchChunks, chunkLease } from "./chunkLease";
 import { extractLeaseTerms, lastModelCallCount, LeaseExtractError } from "./extractTerms";
+import { DeadlineExceededError } from "./serverLog";
 import {
   describeGeminiFailure,
   GEMINI_MAX_ATTEMPTS,
@@ -162,7 +163,7 @@ test("a 503 is retried and the next response is used", async () => {
     assert.deepEqual(waits, [500]);
     assert.ok(logs.some((line) => line.startsWith("retry 1 after 503")));
     assert.ok(logs.some((line) => line.startsWith("batch 1/1 sent")));
-    assert.ok(logs.some((line) => line === "batch 1/1 ok"));
+    assert.ok(logs.some((line) => line === "batch 1/1 finished"));
     const terms = readLeaseTerms(result);
     assert.ok(terms);
     const rent = terms.find((term) => term.category === "rent");
@@ -464,6 +465,66 @@ test("a 10-page lease is sent in small batches, one at a time", async () => {
     assert.equal(calls, batches.length);
     assert.equal(maxInFlight, MODEL_BATCH_CONCURRENCY);
     assert.deepEqual(readExtractionWarnings(result), []);
+  });
+});
+
+test("no batch is sent after the upload time limit", async () => {
+  await withModelEnv(async () => {
+    let calls = 0;
+    await assert.rejects(
+      () =>
+        extractLeaseTerms(LEASE, {
+          deadlineAt: 0,
+          now: () => 1,
+          log: () => {},
+          sleep: async () => {
+            throw new Error("should not wait");
+          },
+          call: async () => {
+            calls += 1;
+            return RENT_JSON;
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof DeadlineExceededError);
+        assert.match(error.message, /npm run dev/);
+        return true;
+      },
+    );
+    assert.equal(calls, 0);
+  });
+});
+
+test("terms already read are kept when the upload time limit runs out", async () => {
+  await withModelEnv(async () => {
+    const rent = `1. Rent\n\n${Array.from({ length: 6 }, () => RENT_SENTENCE).join(" ")}\n`;
+    const deposit = `9. Deposit\n\n${Array.from({ length: 6 }, () => DEPOSIT_SENTENCE).join(" ")}\n`;
+    const lease = `${rent}\n${deposit}`;
+    const maxBatchChars = Math.max(rent.length, deposit.length);
+    let now = 1_000;
+    let calls = 0;
+    const result = await extractLeaseTerms(lease, {
+      maxBatchChars,
+      concurrency: 1,
+      deadlineAt: 5_000,
+      now: () => now,
+      random: () => 0,
+      sleep: async () => {},
+      log: () => {},
+      call: async () => {
+        calls += 1;
+        now = 9_000;
+        return RENT_JSON;
+      },
+    });
+
+    assert.equal(calls, 1);
+    const terms = readLeaseTerms(result);
+    assert.ok(terms?.some((term) => term.category === "rent" && !isUnaddressed(term)));
+    const warnings = readExtractionWarnings(result);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /9\. Deposit/);
+    assert.match(warnings[0] ?? "", /time limit/);
   });
 });
 

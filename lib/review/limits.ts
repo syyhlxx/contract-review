@@ -58,3 +58,18 @@ export const MAX_MODEL_BATCH_CHARS = 4_000;
  * go unless the API key's quota is known to allow more.
  */
 export const MODEL_BATCH_CONCURRENCY = 1;
+
+/**
+ * How long reading the uploaded file (including pulling text out of a PDF)
+ * may take before the route answers with an error.
+ * A 10-page text PDF normally finishes in a few seconds. If this passes
+ * with no further log line, the read is stuck.
+ */
+export const FILE_READ_DEADLINE_MS = 60_000;
+
+/**
+ * How long the whole upload may take: reading the file plus every model
+ * call and retry. The page stops waiting shortly after this and shows an
+ * error, instead of spinning with a quiet terminal.
+ */
+export const REQUEST_DEADLINE_MS = 3 * 60_000;
