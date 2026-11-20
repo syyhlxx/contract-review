@@ -14,7 +14,9 @@ import type { ParsedContract } from "@/lib/review/types";
  * File problems (wrong type, empty, unreadable, too big) answer with status
  * 400. Model problems answer with the extraction error's status and, when
  * the file itself was readable, still include the clauses so the page can
- * show them.
+ * show them. A long lease that was only partly read still answers 200:
+ * `leaseTerms` holds the terms that succeeded and a `warnings` list naming
+ * the sections that failed.
  */
 export async function POST(request: Request) {
   let parsed: ParsedContract | null = null;

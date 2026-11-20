@@ -126,6 +126,18 @@ export function sourceCaption(source: LeaseTermSource | null | undefined): strin
  * Returns null when the response is not the expected object, so the page
  * can show an error and the raw JSON instead of a blank list.
  */
+/**
+ * Warnings written by extraction when some sections could not be read.
+ * The model JSON does not include this field. An empty list means every
+ * section came back.
+ */
+export function readExtractionWarnings(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const warnings = (payload as { warnings?: unknown }).warnings;
+  if (!Array.isArray(warnings)) return [];
+  return warnings.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+}
+
 export function readLeaseTerms(payload: unknown): LeaseTerm[] | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const terms = (payload as { lease_terms?: unknown }).lease_terms;

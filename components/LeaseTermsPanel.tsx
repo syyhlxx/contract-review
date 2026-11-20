@@ -5,6 +5,7 @@ import {
   detailEntries,
   groupLeaseTerms,
   isUnaddressed,
+  readExtractionWarnings,
   readLeaseTerms,
   sourceCaption,
   summaryText,
@@ -19,6 +20,10 @@ import {
  * Categories follow the example (rent, term, renewal, termination, deposit,
  * pets). A term with no summary, details, or quote is shown as "Not addressed".
  * "Show raw JSON" reveals the object the model returned.
+ *
+ * A long lease is read in sections. If one section still fails after the
+ * server retries it, the terms from the other sections are shown and the
+ * warning names the sections that are missing.
  */
 export function LeaseTermsPanel({
   fileName,
@@ -30,6 +35,7 @@ export function LeaseTermsPanel({
   const [showRaw, setShowRaw] = useState(false);
   const terms = readLeaseTerms(result);
   const groups = terms ? groupLeaseTerms(terms) : [];
+  const warnings = readExtractionWarnings(result);
 
   return (
     <section className="rounded-lg border border-stone-300 bg-white">
@@ -49,6 +55,20 @@ export function LeaseTermsPanel({
           {showRaw ? "Hide raw JSON" : "Show raw JSON"}
         </button>
       </div>
+
+      {warnings.length > 0 ? (
+        <div
+          role="alert"
+          className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-950"
+        >
+          <p className="font-medium">Part of this lease was not read</p>
+          {warnings.map((warning, index) => (
+            <p key={`${index}-${warning}`} className="mt-1 leading-6">
+              {warning}
+            </p>
+          ))}
+        </div>
+      ) : null}
 
       {showRaw ? (
         <pre className="max-h-96 overflow-auto border-b border-stone-200 bg-stone-900 p-4 text-xs leading-5 text-stone-100">
