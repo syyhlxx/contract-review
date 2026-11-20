@@ -1,7 +1,10 @@
 import { GoogleGenAI } from "@google/genai";
 import { readFile } from "fs/promises";
 import path from "path";
+import { batchChunks, chunkLease, sectionCitation, type LeaseChunk, type LeaseChunkBatch } from "./chunkLease";
+import { readLeaseTerms, type LeaseTerm } from "./leaseTermView";
 import { MAX_LEASE_CHARS } from "./limits";
+import { mergeLeaseTerms } from "./mergeLeaseTerms";
 
 /**
  * Turns lease text into the JSON object the model returns.
@@ -9,6 +12,11 @@ import { MAX_LEASE_CHARS } from "./limits";
  * The upload route and POST /api/test both call `extractLeaseTerms`.
  * The wording of the prompt matches the original /api/test POST handler.
  * Do not rephrase it here: the model is following those instructions.
+ *
+ * A short lease is still one model call on the full text. A longer lease is
+ * split by `chunkLease` and each batch is sent through that same prompt.
+ * The lists of terms are merged, and a term with a blank section is labeled
+ * from the chunk its quote came from.
  */
 
 const MODEL = "gemini-3.8-flash";
@@ -62,16 +70,32 @@ function assertLeaseText(leaseText: string): void {
     throw new LeaseExtractError("leaseText is required", 400);
   }
 
-  // Chunker plug-in: a long lease would be split into sections here, each
-  // section sent through the same prompt, and the lease_terms lists merged.
-  // Until that exists, refuse oversized text instead of sending it.
+  // Chunking splits leases that fit under this ceiling. Anything longer is
+  // refused so one upload cannot turn into an unbounded run of model calls.
   if (leaseText.length > MAX_LEASE_CHARS) {
     throw new LeaseExtractError(
-      `This lease is too long to extract in one pass (${leaseText.length.toLocaleString()} characters). The limit is ${MAX_LEASE_CHARS.toLocaleString()} characters. Try a shorter file.`,
+      `This lease is too long to extract (${leaseText.length.toLocaleString()} characters). The limit is ${MAX_LEASE_CHARS.toLocaleString()} characters even after splitting it into sections. Try a shorter file.`,
       400,
     );
   }
 }
+
+/**
+ * How many model calls the most recent `extractLeaseTerms` made.
+ * Tests read this. It is not safe to read across two overlapping requests,
+ * and the page never does.
+ */
+let modelCalls = 0;
+
+export function lastModelCallCount(): number {
+  return modelCalls;
+}
+
+/**
+ * Three calls at a time. A long lease may be a few dozen sections; sending
+ * them all at once is more likely to be rate-limited than to finish faster.
+ */
+const EXTRACTION_CONCURRENCY = 3;
 
 /**
  * Stand-in for Gemini when GEMINI_MOCK=1. Tests and local UI checks use this
@@ -207,12 +231,97 @@ export async function extractFromPrompt(leaseText: string, prompt: string): Prom
  * Returns the parsed JSON object (expected shape: { lease_terms: [...] }).
  * There is no schema validation: the page shows whatever came back, and
  * treats null summary/details/source as "Not addressed".
+ *
+ * Short text is one call. Text longer than the chunk size is split along
+ * headings (see chunkLease) and the results are merged into that same shape.
  */
 export async function extractLeaseTerms(leaseText: string): Promise<unknown> {
   assertLeaseText(leaseText);
+  modelCalls = 0;
+
+  const chunks = chunkLease(leaseText);
+  const batches = batchChunks(leaseText, chunks);
+  if (batches.length === 0) {
+    throw new LeaseExtractError("leaseText is required", 400);
+  }
+
+  const batchTerms = await mapPool(batches, EXTRACTION_CONCURRENCY, (batch) =>
+    extractBatch(batch, chunks, batches.length),
+  );
+  return mergeLeaseTerms(batchTerms, batches, chunks);
+}
+
+async function runExtraction(leaseText: string): Promise<unknown> {
+  modelCalls += 1;
   if (process.env.GEMINI_MOCK === "1") {
     return mockLeaseTerms(leaseText);
   }
   const prompt = await buildLeasePrompt(leaseText);
   return runModel(prompt);
+}
+
+async function extractBatch(
+  batch: LeaseChunkBatch,
+  chunks: LeaseChunk[],
+  batchCount: number,
+): Promise<LeaseTerm[]> {
+  let payload: unknown;
+  try {
+    payload = await runExtraction(batch.text);
+  } catch (error) {
+    if (batchCount > 1 && error instanceof LeaseExtractError) {
+      const where = batchLocation(batch, chunks, batchCount);
+      throw new LeaseExtractError(`${error.message} (Stopped ${where}.)`, error.status);
+    }
+    throw error;
+  }
+
+  const terms = readLeaseTerms(payload);
+  if (!terms) {
+    const where = batchCount > 1 ? ` (${batchLocation(batch, chunks, batchCount)})` : "";
+    throw new LeaseExtractError(
+      `The model returned a response that did not include lease terms${where}.`,
+      502,
+    );
+  }
+  return terms;
+}
+
+function batchLocation(batch: LeaseChunkBatch, chunks: LeaseChunk[], batchCount: number): string {
+  const labels: string[] = [];
+  for (const chunk of chunks) {
+    if (!batch.chunkIndexes.includes(chunk.index)) continue;
+    const label = sectionCitation(chunk);
+    if (label && !labels.includes(label)) labels.push(label);
+  }
+  if (labels.length === 1) return `while reading ${labels[0]}`;
+  return `while reading part ${batch.index + 1} of ${batchCount}`;
+}
+
+/**
+ * Run `worker` on each item, a few at a time.
+ *
+ * JavaScript runs this function until it hits `await`, then runs another
+ * one. The cursor increment below finishes before any await, so the workers
+ * do not need a lock to share it.
+ */
+async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+
+  async function run(): Promise<void> {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+
+  const workers = Math.min(Math.max(limit, 1), items.length);
+  await Promise.all(Array.from({ length: workers }, () => run()));
+  return results;
 }

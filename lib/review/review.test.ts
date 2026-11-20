@@ -4,12 +4,13 @@ import test from "node:test";
 import { POST as extractPost } from "../../app/api/extract/route";
 import { POST as parsePost } from "../../app/api/parse/route";
 import { GET as testGet, POST as testPost } from "../../app/api/test/route";
-import { buildDemoPrompt, buildLeasePrompt, extractLeaseTerms, LeaseExtractError } from "./extractTerms";
-import { MAX_LEASE_CHARS, MAX_UPLOAD_BYTES } from "./limits";
+import { buildDemoPrompt, buildLeasePrompt, extractLeaseTerms, lastModelCallCount, LeaseExtractError } from "./extractTerms";
+import { MAX_CHUNK_CHARS, MAX_LEASE_CHARS, MAX_UPLOAD_BYTES } from "./limits";
 import {
   groupLeaseTerms,
   isUnaddressed,
   readLeaseTerms,
+  sourceCaption,
   termSource,
   type LeaseTerm,
 } from "./leaseTermView";
@@ -54,7 +55,7 @@ test("extraction errors and the mock stay off the network", async () => {
       (error: unknown) => {
         assert.ok(error instanceof LeaseExtractError);
         assert.equal(error.status, 400);
-        assert.match(error.message, /too long to extract in one pass/);
+        assert.match(error.message, /too long to extract/);
         return true;
       },
     );
@@ -80,6 +81,10 @@ test("extraction errors and the mock stay off the network", async () => {
     assert.equal(isUnaddressed(pets), true);
     assert.equal(isUnaddressed(rent), false);
     assert.match(termSource(rent)?.quote ?? "", /2,150/);
+    // The sample is short, so it is still one model call. The section is
+    // filled in afterwards from the heading the quote sits under.
+    assert.equal(lastModelCallCount(), 1);
+    assert.equal(termSource(rent)?.section, "2. Rent");
 
     await assert.rejects(
       () => extractLeaseTerms("[[mock-model-failure]]"),
@@ -168,6 +173,69 @@ test("extraction errors and the mock stay off the network", async () => {
     const parsedBody = (await parsed.json()) as { text?: string; clauses?: unknown[] };
     assert.match(parsedBody.text ?? "", /Maple Street/);
     assert.ok((parsedBody.clauses?.length ?? 0) > 0);
+  } finally {
+    if (previousMock === undefined) delete process.env.GEMINI_MOCK;
+    else process.env.GEMINI_MOCK = previousMock;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+});
+
+test("source captions keep article labels and prefix plain numbers", () => {
+  assert.equal(sourceCaption({ section: "2. Rent", page: null, quote: "x" }), "Section 2. Rent");
+  assert.equal(
+    sourceCaption({ section: "ARTICLE 5. RENT", page: 2 }),
+    "ARTICLE 5. RENT, page 2",
+  );
+  assert.equal(
+    sourceCaption({ section: "Section 8. Security Deposit" }),
+    "Section 8. Security Deposit",
+  );
+  assert.equal(sourceCaption({ section: "Art. 5" }), "Art. 5");
+  assert.equal(sourceCaption({ quote: "only a quote" }), null);
+});
+
+test("a long lease is extracted per chunk and each term cites its section", async () => {
+  const previousMock = process.env.GEMINI_MOCK;
+  const previousKey = process.env.GEMINI_API_KEY;
+  try {
+    process.env.GEMINI_MOCK = "1";
+    delete process.env.GEMINI_API_KEY;
+
+    // Filler stays clear of the words the mock looks for (rent, deposit, term).
+    const sentence = "The parties acknowledge the house rules and the local ordinances. ";
+    const filler = Array.from({ length: 40 }, () => sentence.repeat(4).trim()).join("\n\n");
+    const lease = [
+      "1. Rent. Tenant shall pay $1,800 per month, due on the first day of each month.",
+      "",
+      filler,
+      "",
+      "9. Deposit. A security deposit is due before the tenant receives the keys.",
+    ].join("\n");
+
+    assert.ok(lease.length > MAX_CHUNK_CHARS);
+    assert.ok(lease.length < MAX_LEASE_CHARS);
+
+    const result = await extractLeaseTerms(lease);
+    assert.ok(lastModelCallCount() > 1);
+
+    const terms = readLeaseTerms(result);
+    assert.ok(terms);
+    const rent = terms.find(
+      (term) => term.category === "rent" && String(termSource(term)?.section ?? "").startsWith("1"),
+    );
+    const deposit = terms.find((term) => term.category === "deposit");
+    const pets = terms.find((term) => term.category === "pets");
+    assert.ok(rent);
+    assert.equal(isUnaddressed(rent), false);
+    assert.match(String(termSource(rent)?.quote ?? ""), /1,800/);
+    assert.equal(termSource(rent)?.section, "1. Rent");
+    assert.ok(deposit);
+    assert.equal(isUnaddressed(deposit), false);
+    assert.match(String(termSource(deposit)?.quote ?? ""), /deposit/i);
+    assert.equal(termSource(deposit)?.section, "9. Deposit");
+    assert.ok(pets);
+    assert.equal(isUnaddressed(pets), true);
   } finally {
     if (previousMock === undefined) delete process.env.GEMINI_MOCK;
     else process.env.GEMINI_MOCK = previousMock;
