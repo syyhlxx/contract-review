@@ -145,6 +145,7 @@ test("a 503 is retried and the next response is used", async () => {
     const waits: number[] = [];
     const logs: string[] = [];
     const result = await extractLeaseTerms(LEASE, {
+      models: ["only-model"],
       random: () => 0,
       sleep: async (ms) => {
         waits.push(ms);
@@ -163,7 +164,7 @@ test("a 503 is retried and the next response is used", async () => {
     assert.deepEqual(waits, [500]);
     assert.ok(logs.some((line) => line.startsWith("retry 1 after 503")));
     assert.ok(logs.some((line) => line.startsWith("batch 1/1 sent")));
-    assert.ok(logs.some((line) => line === "batch 1/1 finished"));
+    assert.ok(logs.some((line) => line.startsWith("batch 1/1 finished")));
     const terms = readLeaseTerms(result);
     assert.ok(terms);
     const rent = terms.find((term) => term.category === "rent");
@@ -181,6 +182,7 @@ test("retries stop after the maximum number of attempts", async () => {
     await assert.rejects(
       () =>
         extractLeaseTerms(LEASE, {
+          models: ["only-model"],
           random: () => 1,
           sleep: async (ms) => {
             waits.push(ms);
@@ -379,6 +381,7 @@ test("a failed section is listed and the sections that succeeded are kept", asyn
     let attempts = 0;
     const logs: string[] = [];
     const result = await extractLeaseTerms(lease, {
+      models: ["only-model"],
       maxBatchChars,
       concurrency: 1,
       random: () => 0,

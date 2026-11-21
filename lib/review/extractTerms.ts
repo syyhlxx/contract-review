@@ -3,7 +3,6 @@ import { readFile } from "fs/promises";
 import path from "path";
 import { batchChunks, chunkLease, sectionCitation, type LeaseChunk, type LeaseChunkBatch } from "./chunkLease";
 import {
-  callGeminiWithRetry,
   describeGeminiFailure,
   GEMINI_MAX_ATTEMPTS,
   GEMINI_REQUEST_TIMEOUT_MS,
@@ -12,6 +11,13 @@ import {
 import { readLeaseTerms, type LeaseTerm } from "./leaseTermView";
 import { MAX_LEASE_CHARS, MAX_MODEL_BATCH_CHARS, MODEL_BATCH_CONCURRENCY } from "./limits";
 import { mergeLeaseTerms } from "./mergeLeaseTerms";
+import {
+  callWithModelFallback,
+  createModelCircuit,
+  currentModel,
+  loadGeminiModels,
+  type ModelCircuit,
+} from "./modelFallback";
 import { DeadlineExceededError, serverLog } from "./serverLog";
 
 /**
@@ -31,8 +37,6 @@ import { DeadlineExceededError, serverLog } from "./serverLog";
  * batches that succeeded are returned with a warning. The page shows that
  * warning. The whole request fails only when every batch failed.
  */
-
-const MODEL = "gemini-3.8-flash";
 
 /**
  * A normal Error plus an HTTP status, so route handlers can tell
@@ -134,6 +138,11 @@ export type ExtractLeaseTermsOptions = {
   now?: () => number;
   /** Aborted when the upload's overall deadline fires. */
   requestSignal?: AbortSignal;
+  /**
+   * Model ids to try, primary first. Tests pass a short list.
+   * Production reads GEMINI_MODEL and GEMINI_FALLBACK_MODELS.
+   */
+  models?: string[];
 };
 
 type AttemptOptions = {
@@ -146,6 +155,7 @@ type AttemptOptions = {
   deadlineAt?: number;
   now: () => number;
   requestSignal?: AbortSignal;
+  circuit: ModelCircuit;
 };
 
 type BatchFailure = {
@@ -250,7 +260,8 @@ export async function extractFromPrompt(leaseText: string, prompt: string): Prom
   const options = resolveOptions();
   options.log("demo request sent");
   modelCalls += 1;
-  return parseModelText(await requestModel(prompt, options));
+  const { text } = await requestModel(prompt, options);
+  return parseModelText(text);
 }
 
 /**
@@ -266,7 +277,7 @@ export async function extractFromPrompt(leaseText: string, prompt: string): Prom
 export async function extractLeaseTerms(
   leaseText: string,
   options?: ExtractLeaseTermsOptions,
-): Promise<{ lease_terms: LeaseTerm[]; warnings?: string[] }> {
+): Promise<{ lease_terms: LeaseTerm[]; warnings?: string[]; models_used?: string[] }> {
   assertLeaseText(leaseText);
   modelCalls = 0;
 
@@ -321,8 +332,22 @@ export async function extractLeaseTerms(
   }
 
   const merged = mergeLeaseTerms(okTerms, okBatches, chunks);
-  if (failures.length === 0) return merged;
-  return { ...merged, warnings: [formatWarning(failures)] };
+  const modelsUsed = modelsFrom(okTerms);
+  const withModels = modelsUsed.length > 0 ? { ...merged, models_used: modelsUsed } : merged;
+  if (failures.length === 0) return withModels;
+  return { ...withModels, warnings: [formatWarning(failures)] };
+}
+
+function modelsFrom(batches: LeaseTerm[][]): string[] {
+  const models: string[] = [];
+  for (const terms of batches) {
+    for (const term of terms) {
+      const model = term.model;
+      if (typeof model !== "string" || model === "" || model === "mock") continue;
+      if (!models.includes(model)) models.push(model);
+    }
+  }
+  return models;
 }
 
 function resolveOptions(options?: ExtractLeaseTermsOptions): AttemptOptions {
@@ -336,6 +361,7 @@ function resolveOptions(options?: ExtractLeaseTermsOptions): AttemptOptions {
     deadlineAt: options?.deadlineAt,
     now: options?.now ?? Date.now,
     requestSignal: options?.requestSignal,
+    circuit: createModelCircuit(options?.models ?? loadGeminiModels()),
   };
 }
 
@@ -351,13 +377,17 @@ function requireApiKey(): void {
   );
 }
 
-async function runExtraction(leaseText: string, options: AttemptOptions): Promise<unknown> {
+async function runExtraction(
+  leaseText: string,
+  options: AttemptOptions,
+): Promise<{ payload: unknown; model: string }> {
   modelCalls += 1;
   if (process.env.GEMINI_MOCK === "1") {
-    return mockLeaseTerms(leaseText);
+    return { payload: mockLeaseTerms(leaseText), model: "mock" };
   }
   const prompt = await buildLeasePrompt(leaseText);
-  return parseModelText(await requestModel(prompt, options));
+  const { text, model } = await requestModel(prompt, options);
+  return { payload: parseModelText(text), model };
 }
 
 /**
@@ -366,19 +396,29 @@ async function runExtraction(leaseText: string, options: AttemptOptions): Promis
  * `callGeminiWithRetry` does the retries so the log shows each one, and so
  * a Retry-After hint is honored. The SDK's retry does not read that hint.
  */
-async function requestModel(prompt: string, options: AttemptOptions): Promise<string> {
-  const call: GeminiTextCall =
+async function requestModel(
+  prompt: string,
+  options: AttemptOptions,
+): Promise<{ text: string; model: string }> {
+  const call =
     options.call ??
-    ((text, signal) =>
-      generateWithGemini(text, linkSignals(signal, options.requestSignal), options.timeoutMs));
+    ((text: string, signal: AbortSignal, model: string) =>
+      generateWithGemini(
+        text,
+        linkSignals(signal, options.requestSignal),
+        options.timeoutMs,
+        model,
+      ));
 
   try {
-    return await callGeminiWithRetry(prompt, {
+    return await callWithModelFallback({
+      prompt,
+      circuit: options.circuit,
       call,
       maxAttempts: options.maxAttempts,
       timeoutMs: options.timeoutMs,
-      sleep: options.sleep,
-      random: options.random,
+      sleep: options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+      random: options.random ?? Math.random,
       log: options.log,
       stop: () => pastDeadline(options),
     });
@@ -393,6 +433,7 @@ async function generateWithGemini(
   prompt: string,
   signal: AbortSignal,
   timeoutMs: number,
+  model: string,
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -404,8 +445,8 @@ async function generateWithGemini(
 
   // Same call the original route made: one model, JSON mime type, no schema.
   const ai = new GoogleGenAI({ apiKey });
-  const response = await ai.models.generateContent({
-    model: MODEL,
+    const response = await ai.models.generateContent({
+      model,
     contents: prompt,
     config: {
       responseMimeType: "application/json",
@@ -443,11 +484,14 @@ async function extractBatch(
     options.log(`${name} skipped (upload time limit)`);
     return { terms: null, failure: { label, reason: "the upload time limit ran out", error } };
   }
-  options.log(`${name} sent (${batch.text.length} characters of lease text)`);
+  const startingModel = process.env.GEMINI_MOCK === "1" ? "mock" : currentModel(options.circuit);
+  options.log(`${name} sent (${batch.text.length} characters of lease text) model ${startingModel}`);
 
   try {
-    const payload = await runExtraction(batch.text, options);
-    const terms = readLeaseTerms(payload);
+    const { payload, model } = await runExtraction(batch.text, options);
+    const terms = readLeaseTerms(payload)?.map((term) =>
+      model === "mock" ? term : { ...term, model },
+    ) ?? null;
     if (!terms) {
       const error = new LeaseExtractError(
         `The model returned a response that did not include lease terms (${label}).`,
@@ -459,7 +503,7 @@ async function extractBatch(
         failure: { label, reason: "the response did not include lease terms", error },
       };
     }
-    options.log(`${name} finished`);
+    options.log(`${name} finished model ${model}`);
     return { terms, failure: null };
   } catch (error) {
     const reason = describeGeminiFailure(error).reason;

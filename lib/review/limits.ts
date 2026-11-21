@@ -69,7 +69,8 @@ export const FILE_READ_DEADLINE_MS = 60_000;
 
 /**
  * How long the whole upload may take: reading the file plus every model
- * call and retry. The page stops waiting shortly after this and shows an
- * error, instead of spinning with a quiet terminal.
+ * call. A 10-page lease is about 8 batches. Five minutes is enough for
+ * those batches when an overloaded model is abandoned quickly. The browser
+ * waits 15 seconds longer than this, so it can still show the server's error.
  */
-export const REQUEST_DEADLINE_MS = 3 * 60_000;
+export const REQUEST_DEADLINE_MS = 5 * 60_000;

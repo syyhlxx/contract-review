@@ -26,11 +26,13 @@ export const GEMINI_MAX_ATTEMPTS = 4;
 
 /**
  * How long one attempt may run before we cancel it and retry.
- * A one-to-two page batch normally answers in a few seconds. 45 seconds is
- * long enough for a slow answer and short enough that a hung call does not
- * sit there for the several minutes Gemini's own deadline allows.
+ * A one-to-two page batch normally answers in a few seconds. 60 seconds
+ * covers a slow answer. It is not 45: a batch that is merely slow was being
+ * cancelled and retried, and those retries used up the upload's time budget.
+ * An overloaded model (503 or 504) is not retried here for the whole budget.
+ * The caller switches to the next model instead.
  */
-export const GEMINI_REQUEST_TIMEOUT_MS = 45_000;
+export const GEMINI_REQUEST_TIMEOUT_MS = 60_000;
 
 /** First retry waits about this long. Each later retry doubles it. */
 export const GEMINI_RETRY_BASE_MS = 1_000;
@@ -82,7 +84,11 @@ const NETWORK_CODES = new Set([
  * `signal` is aborted when the time limit fires, which cancels the HTTP
  * request. Tests pass a function with this same shape and never open a socket.
  */
-export type GeminiTextCall = (prompt: string, signal: AbortSignal) => Promise<string>;
+export type GeminiTextCall = (
+  prompt: string,
+  signal: AbortSignal,
+  model?: string,
+) => Promise<string>;
 
 export type GeminiRetryOptions = {
   call: GeminiTextCall;

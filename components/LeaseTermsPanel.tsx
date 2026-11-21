@@ -7,6 +7,7 @@ import {
   isUnaddressed,
   readExtractionWarnings,
   readLeaseTerms,
+  readModelsUsed,
   sourceCaption,
   summaryText,
   termSource,
@@ -36,6 +37,7 @@ export function LeaseTermsPanel({
   const terms = readLeaseTerms(result);
   const groups = terms ? groupLeaseTerms(terms) : [];
   const warnings = readExtractionWarnings(result);
+  const modelsUsed = readModelsUsed(result);
 
   return (
     <section className="rounded-lg border border-stone-300 bg-white">
@@ -45,6 +47,9 @@ export function LeaseTermsPanel({
           <p className="mt-1 text-sm text-stone-600">
             {fileName}. Each value is shown next to the lease quote it came from.
           </p>
+          {modelsUsed.length > 0 ? (
+            <p className="mt-1 text-xs text-stone-500">Read with {modelsUsed.join(", then ")}.</p>
+          ) : null}
         </div>
         <button
           type="button"
