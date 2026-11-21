@@ -138,6 +138,9 @@ export function chunkLease(text: string, options?: ChunkLeaseOptions): LeaseChun
  * Short leases therefore go out in one call, exactly as they did before
  * this splitter existed. Longer leases are packed in order until the next
  * chunk would pass `maxChars`.
+ *
+ * Extraction passes MAX_MODEL_BATCH_CHARS, which is smaller than the
+ * default chunk size, so a long lease is not sent in 8,000-character pieces.
  */
 export function batchChunks(
   text: string,

@@ -35,6 +35,8 @@ export type LeaseTerm = {
   summary?: unknown;
   details?: unknown;
   source?: unknown;
+  /** Model id that produced this term. Absent for the mock extractor. */
+  model?: string;
 };
 
 export type TermGroup = {
@@ -126,6 +128,33 @@ export function sourceCaption(source: LeaseTermSource | null | undefined): strin
  * Returns null when the response is not the expected object, so the page
  * can show an error and the raw JSON instead of a blank list.
  */
+/**
+ * Warnings written by extraction when some sections could not be read.
+ * The model JSON does not include this field. An empty list means every
+ * section came back.
+ */
+/** Model ids that produced terms, in the order they were first used. */
+export function readModelsUsed(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const raw = (payload as { models_used?: unknown }).models_used;
+  if (!Array.isArray(raw)) return [];
+  const models: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (!name || models.includes(name)) continue;
+    models.push(name);
+  }
+  return models;
+}
+
+export function readExtractionWarnings(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const warnings = (payload as { warnings?: unknown }).warnings;
+  if (!Array.isArray(warnings)) return [];
+  return warnings.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+}
+
 export function readLeaseTerms(payload: unknown): LeaseTerm[] | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const terms = (payload as { lease_terms?: unknown }).lease_terms;
