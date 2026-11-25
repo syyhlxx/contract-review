@@ -45,6 +45,7 @@ next-env.d.ts
 # contract files
 private/
 *.pdf
+!docs/samples/*.pdf
 *.docx
 
 # extraction progress, written while an upload is running
