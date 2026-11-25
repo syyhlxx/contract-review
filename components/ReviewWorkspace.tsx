@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
 import { LeaseTermsPanel } from "@/components/LeaseTermsPanel";
-import { MAX_UPLOAD_BYTES } from "@/lib/review/limits";
+import { MAX_UPLOAD_BYTES, REQUEST_DEADLINE_MS } from "@/lib/review/limits";
 import { SAMPLE_LEASE, SAMPLE_LEASE_NAME } from "@/lib/review/sampleLease";
 import { splitClauses } from "@/lib/review/splitClauses";
 import type { Clause, ClauseNote, ParsedContract, ReviewStatus } from "@/lib/review/types";
@@ -97,7 +97,15 @@ export function ReviewWorkspace() {
 
     setBusy(true);
     setError(null);
-    setStatus(`Reading ${file.name} and extracting lease terms…`);
+    setStatus(
+      `Reading ${file.name} and extracting lease terms. Progress is printed in the terminal running npm run dev.`,
+    );
+
+    // The server stops itself after REQUEST_DEADLINE_MS. This timer is a
+    // backstop for the page: if that response never comes, the spinner ends
+    // and the message below tells you where the last server log line is.
+    const controller = new AbortController();
+    const gaveUp = window.setTimeout(() => controller.abort(), REQUEST_DEADLINE_MS + 15_000);
 
     try {
       // FormData is the browser's package for sending a file.
@@ -106,7 +114,12 @@ export function ReviewWorkspace() {
       body.set("file", file);
 
       // await pauses this function until the server answers, without freezing the page.
-      const response = await fetch("/api/extract", { method: "POST", body });
+      // The URL is /api/extract. /api/parse only reads a file. /api/test takes JSON.
+      const response = await fetch("/api/extract", {
+        method: "POST",
+        body,
+        signal: controller.signal,
+      });
       const payload = await readExtractPayload(response);
       const parsed = hasContract(payload);
 
@@ -131,13 +144,16 @@ export function ReviewWorkspace() {
       setLeaseTerms(payload.leaseTerms);
     } catch (err) {
       const message =
-        err instanceof TypeError
-          ? "Could not reach the server. Check your connection and try again."
-          : err instanceof Error
-            ? err.message
-            : "Upload failed.";
+        err instanceof Error && err.name === "AbortError"
+          ? "The server did not answer in time. Look at the terminal running npm run dev for the last step it printed."
+          : err instanceof TypeError
+            ? "Could not reach the server. Check your connection and try again."
+            : err instanceof Error
+              ? err.message
+              : "Upload failed.";
       setError(`${file.name}: ${message}`);
     } finally {
+      window.clearTimeout(gaveUp);
       setBusy(false);
       setStatus(null);
     }

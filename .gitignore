@@ -28,9 +28,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files
+# env files (the example has no secrets and is committed)
 .env
-.env*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # vercel
 .vercel
@@ -42,4 +45,8 @@ next-env.d.ts
 # contract files
 private/
 *.pdf
+!docs/samples/*.pdf
 *.docx
+
+# extraction progress, written while an upload is running
+/logs/
